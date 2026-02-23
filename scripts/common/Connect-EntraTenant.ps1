@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Connects to a Microsoft Entra tenant using a service principal (client secret).
+    Connects to a Microsoft Entra tenant using a service principal (federated credential / OIDC).
 
 .PARAMETER TenantId
     The Azure AD / Entra tenant ID.
@@ -8,8 +8,9 @@
 .PARAMETER ClientId
     The service principal (app registration) client ID.
 
-.PARAMETER ClientSecret
-    The service principal client secret.
+.PARAMETER FederatedToken
+    The OIDC token obtained from the GitHub Actions identity provider.
+    Used to authenticate without a client secret (workload identity federation).
 #>
 function Connect-EntraTenant {
     [CmdletBinding()]
@@ -21,15 +22,11 @@ function Connect-EntraTenant {
         [string]$ClientId,
 
         [Parameter(Mandatory = $true)]
-        [string]$ClientSecret
+        [string]$FederatedToken
     )
 
     try {
-        $SecureSecret = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
-        $Credential   = New-Object -TypeName System.Management.Automation.PSCredential `
-                                   -ArgumentList $ClientId, $SecureSecret
-
-        Connect-Entra -TenantId $TenantId -ClientSecretCredential $Credential `
+        Connect-Entra -TenantId $TenantId -ClientId $ClientId -FederatedToken $FederatedToken `
                       -NoWelcome -ErrorAction Stop
     }
     catch {

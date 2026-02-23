@@ -6,15 +6,15 @@
 .PARAMETER Environment   Environment label shown in logs (Test | Prod).
 .PARAMETER TenantId      Entra tenant ID.
 .PARAMETER ClientId      Service principal client ID.
-.PARAMETER ClientSecret  Service principal client secret.
-.PARAMETER GroupId       Object ID of the target birthright group.
-.PARAMETER LogFile       Path to the log file for this run.
+.PARAMETER FederatedToken OIDC token from the GitHub Actions identity provider.
+.PARAMETER GroupId        Object ID of the target birthright group.
+.PARAMETER LogFile        Path to the log file for this run.
 #>
 param (
     [Parameter(Mandatory)] [string]$Environment,
     [Parameter(Mandatory)] [string]$TenantId,
     [Parameter(Mandatory)] [string]$ClientId,
-    [Parameter(Mandatory)] [string]$ClientSecret,
+    [Parameter(Mandatory)] [string]$FederatedToken,
     [Parameter(Mandatory)] [string]$GroupId,
     [Parameter(Mandatory)] [string]$LogFile
 )
@@ -25,7 +25,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/../common/Connect-EntraTenant.ps1"
 . "$PSScriptRoot/../common/Write-Log.ps1"
 
-Connect-EntraTenant -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
+Connect-EntraTenant -TenantId $TenantId -ClientId $ClientId -FederatedToken $FederatedToken
 
 $group = Get-EntraGroup -GroupId $GroupId -ErrorAction Stop
 Write-Log "[$Environment] Target group: '$($group.DisplayName)'" -LogFile $LogFile
