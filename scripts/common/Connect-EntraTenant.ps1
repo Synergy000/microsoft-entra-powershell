@@ -45,8 +45,9 @@ function Connect-EntraTenant {
 
         $SecureToken = ConvertTo-SecureString -String $tokenResponse.access_token -AsPlainText -Force
 
-        Connect-Entra -AccessToken $SecureToken -TenantId $TenantId `
-                      -NoWelcome -ErrorAction Stop
+        # -TenantId is incompatible with the -AccessToken parameter set;
+        # the tenant is already embedded in the access token.
+        Connect-Entra -AccessToken $SecureToken -NoWelcome -ErrorAction Stop
     }
     catch {
         throw "Failed to connect to Entra tenant '$TenantId': $_"
