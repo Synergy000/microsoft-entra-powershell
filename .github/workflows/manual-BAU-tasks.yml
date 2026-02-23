@@ -41,6 +41,14 @@ jobs:
         shell: pwsh
         run: Install-Module Microsoft.Entra -Force -AllowClobber -Scope CurrentUser
 
+      - name: Diagnose Connect-Entra parameters
+        shell: pwsh
+        run: |
+          Write-Host "=== Module version ==="
+          Get-Module Microsoft.Entra -ListAvailable | Select-Object Name, Version | Format-Table
+          Write-Host "=== Connect-Entra parameter names ==="
+          (Get-Command Connect-Entra).Parameters.Keys | Sort-Object | ForEach-Object { Write-Host $_ }
+
       - name: Get OIDC token
         shell: pwsh
         run: |
