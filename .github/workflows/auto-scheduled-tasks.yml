@@ -33,7 +33,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache PowerShell modules
+        id: cache-psmodules
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/powershell/Modules
+          key: psmodules-${{ hashFiles('config/pipeline.psd1') }}
+
       - name: Install Microsoft Entra PowerShell
+        if: steps.cache-psmodules.outputs.cache-hit != 'true'
         shell: pwsh
         run: Install-Module Microsoft.Entra -Force -AllowClobber -Scope CurrentUser
 
