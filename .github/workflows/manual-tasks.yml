@@ -1,0 +1,114 @@
+name: Manual Tasks
+
+# Triggered manually from Actions → Manual Tasks → Run workflow.
+# Select the branch and task to run.
+#
+# Branch → Environment:
+#   test  →  test        (manual only)
+#   main  →  production  (manual only)
+#
+# Merge prerequisites (enforced by verify-merge job):
+#   test branch  — a feature branch must be merged into test before triggering
+#   main branch  — test branch must be merged into main before triggering
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Task to run'
+        required: true
+        type: choice
+        options:
+          - create-groups
+          - add-members
+
+env:
+  # Bump this value (e.g. v2, v3) to force a fresh PowerShell module install.
+  PS_MODULE_CACHE_KEY: v1
+
+jobs:
+  verify-merge:
+    name: Verify merge prerequisite (${{ github.ref_name }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history required for ancestry checks
+
+      - name: Check merge prerequisite
+        run: |
+          BRANCH="${{ github.ref_name }}"
+
+          if [ "$BRANCH" = "main" ]; then
+            echo "Branch: main → verifying test is fully merged into main..."
+            git fetch origin test
+            if git merge-base --is-ancestor origin/test HEAD; then
+              echo "✅ test is merged into main — production run authorised."
+            else
+              echo "❌ test has commits not present in main."
+              echo "   Open a PR to merge test → main and complete it before triggering the production workflow."
+              exit 1
+            fi
+          else
+            echo "Branch: $BRANCH → verifying feature work is present (test is ahead of main)..."
+            git fetch origin main
+            AHEAD=$(git rev-list --count origin/main..HEAD)
+            if [ "$AHEAD" -gt 0 ]; then
+              echo "✅ $BRANCH is $AHEAD commit(s) ahead of main — test run authorised."
+            else
+              echo "❌ $BRANCH has no new commits ahead of main."
+              echo "   Merge a feature branch into test before triggering the test workflow."
+              exit 1
+            fi
+          fi
+
+  run:
+    name: ${{ inputs.task }} on ${{ github.ref_name }}
+    needs: verify-merge
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'production' || 'test' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache PowerShell modules
+        id: ps-module-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/powershell/Modules
+          key: ps-modules-${{ env.PS_MODULE_CACHE_KEY }}
+
+      - name: Install Microsoft Entra PowerShell
+        if: steps.ps-module-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: Install-Module Microsoft.Entra -Force -AllowClobber -Scope CurrentUser
+
+      - name: Run ${{ inputs.task }}
+        shell: pwsh
+        env:
+          TENANT_ID:     ${{ secrets.TENANT_ID }}
+          CLIENT_ID:     ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+        run: |
+          $envLabel = if ('${{ github.ref_name }}' -eq 'main') { 'Prod' } else { 'Test' }
+          $logFile  = "logs/$envLabel/${{ inputs.task }}_run${{ github.run_number }}.log"
+          $params   = @{
+            Environment  = $envLabel
+            TenantId     = $env:TENANT_ID
+            ClientId     = $env:CLIENT_ID
+            ClientSecret = $env:CLIENT_SECRET
+            LogFile      = $logFile
+          }
+          if ('${{ inputs.task }}' -eq 'create-groups') {
+            ./scripts/manual-tasks/New-EntraGroups.ps1 @params -CsvPath 'data/input/groups.csv'
+          } else {
+            ./scripts/manual-tasks/Add-EntraGroupMembers.ps1 @params -CsvPath 'data/input/members.csv'
+          }
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.task }}_${{ github.ref_name }}_run${{ github.run_number }}
+          path: logs/
+          retention-days: 90
