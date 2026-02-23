@@ -1,21 +1,19 @@
 <#
 .SYNOPSIS
-    Creates Entra security groups from a CSV file (idempotent — skips existing groups).
+    Creates Entra security groups defined in data/input/groups.csv.
+    Idempotent: skips groups that already exist.
 
-.PARAMETER Environment   Target environment label (Test | Prod).
+.PARAMETER Environment   Environment label shown in logs (Test | Prod).
 .PARAMETER TenantId      Entra tenant ID.
 .PARAMETER ClientId      Service principal client ID.
 .PARAMETER ClientSecret  Service principal client secret.
-.PARAMETER CsvPath       CSV with columns: DisplayName, MailNickname, Description
-.PARAMETER LogFile       Log file path. Convention: create-groups_{env}_run{n}.log
+.PARAMETER LogFile       Path to the log file for this run.
 #>
-[CmdletBinding()]
 param (
     [Parameter(Mandatory)] [string]$Environment,
     [Parameter(Mandatory)] [string]$TenantId,
     [Parameter(Mandatory)] [string]$ClientId,
     [Parameter(Mandatory)] [string]$ClientSecret,
-    [Parameter(Mandatory)] [string]$CsvPath,
     [Parameter(Mandatory)] [string]$LogFile
 )
 
@@ -25,46 +23,33 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/../common/Connect-EntraTenant.ps1"
 . "$PSScriptRoot/../common/Write-Log.ps1"
 
-# ── Validate CSV ──────────────────────────────────────────────────────────────
-if (-not (Test-Path -Path $CsvPath)) {
-    Write-Log "CSV file not found: '$CsvPath'" -Level ERROR -LogFile $LogFile
-    exit 1
+# Load shared config (CSV path, etc.)
+$config  = Import-PowerShellDataFile (Join-Path $PSScriptRoot '../../config/pipeline.psd1')
+$csvPath = $config.GroupsCsv
+
+# Validate the CSV before connecting
+if (-not (Test-Path $csvPath)) {
+    Write-Log "CSV not found: $csvPath" -Level ERROR -LogFile $LogFile; exit 1
 }
-
-$rows = Import-Csv -Path $CsvPath
-
+$rows = @(Import-Csv $csvPath)
 if ($rows.Count -eq 0) {
-    Write-Log "CSV '$CsvPath' contains no data rows. Nothing to do." -LogFile $LogFile
-    exit 0
+    Write-Log 'CSV has no data rows. Nothing to do.' -LogFile $LogFile; exit 0
 }
 
-$requiredColumns = @('DisplayName', 'MailNickname', 'Description')
-$csvColumns      = $rows[0].PSObject.Properties.Name
-$missingColumns  = $requiredColumns | Where-Object { $_ -notin $csvColumns }
-
-if ($missingColumns) {
-    Write-Log "CSV is missing required column(s): $($missingColumns -join ', ')" -Level ERROR -LogFile $LogFile
-    exit 1
-}
-
-# ── Connect ───────────────────────────────────────────────────────────────────
 Connect-EntraTenant -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
-Write-Log "[$Environment] Connected. Processing '$CsvPath' ($($rows.Count) row(s))..." -LogFile $LogFile
+Write-Log "[$Environment] Processing '$csvPath' ($($rows.Count) rows)..." -LogFile $LogFile
 
-# ── Process rows ──────────────────────────────────────────────────────────────
-$ok = 0; $skip = 0; $fail = 0
+$created = 0; $skipped = 0; $failed = 0
 
 foreach ($row in $rows) {
     try {
-        # Escape single quotes in OData filter values
-        $escapedName = $row.DisplayName.Replace("'", "''")
-        $existing    = Get-EntraGroup -Filter "DisplayName eq '$escapedName'" |
-                           Select-Object -First 1
+        # Check if the group already exists (idempotency)
+        $safeName = $row.DisplayName.Replace("'", "''")
+        $existing = Get-EntraGroup -Filter "DisplayName eq '$safeName'" | Select-Object -First 1
 
         if ($existing) {
-            Write-Log "SKIP    | $($row.DisplayName) — group already exists" -LogFile $LogFile
-            $skip++
-            continue
+            Write-Log "SKIP    | $($row.DisplayName) — already exists" -LogFile $LogFile
+            $skipped++; continue
         }
 
         New-EntraGroup `
@@ -75,13 +60,13 @@ foreach ($row in $rows) {
             -Description     $row.Description | Out-Null
 
         Write-Log "CREATED | $($row.DisplayName)" -LogFile $LogFile
-        $ok++
+        $created++
     }
     catch {
         Write-Log "FAILED  | $($row.DisplayName) | $_" -Level ERROR -LogFile $LogFile
-        $fail++
+        $failed++
     }
 }
 
-Write-Log "Summary | Created: $ok | Skipped: $skip | Failed: $fail" -LogFile $LogFile
-if ($fail -gt 0) { exit 1 }
+Write-Log "Done — Created: $created | Skipped: $skipped | Failed: $failed" -LogFile $LogFile
+if ($failed -gt 0) { exit 1 }
