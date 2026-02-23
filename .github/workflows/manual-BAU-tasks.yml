@@ -1,0 +1,82 @@
+name: Manual BAU Tasks
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [dev, test]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment
+        required: true
+        type: choice
+        options: [dev, test]
+      task:
+        description: Task
+        required: true
+        type: choice
+        options: [create-groups, add-members]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  run:
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+       github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ github.event_name == 'pull_request' && github.base_ref || inputs.environment }}
+    env:
+      ENV_NAME:  ${{ github.event_name == 'pull_request' && github.base_ref || inputs.environment }}
+      TENANT_ID: ${{ secrets.TENANT_ID }}
+      CLIENT_ID: ${{ secrets.CLIENT_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache PowerShell modules
+        id: cache-psmodules
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/powershell/Modules
+          key: psmodules-${{ hashFiles('config/pipeline.psd1') }}
+
+      - name: Install Microsoft Entra PowerShell
+        if: steps.cache-psmodules.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: Install-Module Microsoft.Entra -Force -AllowClobber -Scope CurrentUser
+
+      - name: Get OIDC token
+        shell: pwsh
+        run: |
+          $r = Invoke-RestMethod `
+            -Uri "$($env:ACTIONS_ID_TOKEN_REQUEST_URL)&audience=api://AzureADTokenExchange" `
+            -Headers @{ Authorization = "Bearer $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN" }
+          "FEDERATED_TOKEN=$($r.value)" >> $env:GITHUB_ENV
+
+      - name: Create groups
+        shell: pwsh
+        run: |
+          ./scripts/manual-tasks/New-EntraGroups.ps1 `
+            -Environment $env:ENV_NAME `
+            -TenantId $env:TENANT_ID -ClientId $env:CLIENT_ID -FederatedToken $env:FEDERATED_TOKEN `
+            -LogFile logs/$env:ENV_NAME/create-groups_run${{ github.run_number }}.log
+
+      - name: Add members
+        shell: pwsh
+        run: |
+          ./scripts/manual-tasks/Add-EntraGroupMembers.ps1 `
+            -Environment $env:ENV_NAME `
+            -TenantId $env:TENANT_ID -ClientId $env:CLIENT_ID -FederatedToken $env:FEDERATED_TOKEN `
+            -LogFile logs/$env:ENV_NAME/add-members_run${{ github.run_number }}.log
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-tasks_${{ env.ENV_NAME }}_run${{ github.run_number }}
+          path: logs/
+          retention-days: 90

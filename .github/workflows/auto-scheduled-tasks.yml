@@ -1,0 +1,71 @@
+name: Auto Tasks
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [dev, test]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment
+        required: true
+        type: choice
+        options: [dev, test]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  birthright:
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+       github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ github.event_name == 'pull_request' && github.base_ref || inputs.environment }}
+    env:
+      ENV_NAME:  ${{ github.event_name == 'pull_request' && github.base_ref || inputs.environment }}
+      TENANT_ID: ${{ secrets.TENANT_ID }}
+      CLIENT_ID: ${{ secrets.CLIENT_ID }}
+      GROUP_ID:  ${{ secrets.BIRTHRIGHT_GROUP_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache PowerShell modules
+        id: cache-psmodules
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/powershell/Modules
+          key: psmodules-${{ hashFiles('config/pipeline.psd1') }}
+
+      - name: Install Microsoft Entra PowerShell
+        if: steps.cache-psmodules.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: Install-Module Microsoft.Entra -Force -AllowClobber -Scope CurrentUser
+
+      - name: Get OIDC token
+        shell: pwsh
+        run: |
+          $r = Invoke-RestMethod `
+            -Uri "$($env:ACTIONS_ID_TOKEN_REQUEST_URL)&audience=api://AzureADTokenExchange" `
+            -Headers @{ Authorization = "Bearer $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN" }
+          "FEDERATED_TOKEN=$($r.value)" >> $env:GITHUB_ENV
+
+      - name: Add new joiners to birthright group
+        shell: pwsh
+        run: |
+          ./scripts/auto-tasks/Add-BirthrightMembers.ps1 `
+            -Environment $env:ENV_NAME `
+            -TenantId $env:TENANT_ID -ClientId $env:CLIENT_ID -FederatedToken $env:FEDERATED_TOKEN `
+            -GroupId $env:GROUP_ID `
+            -LogFile logs/$env:ENV_NAME/birthright_run${{ github.run_number }}.log
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: birthright_${{ env.ENV_NAME }}_run${{ github.run_number }}
+          path: logs/
+          retention-days: 90
