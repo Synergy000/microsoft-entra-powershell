@@ -11,16 +11,21 @@ Automated group and membership management for Microsoft Entra ID using
 .
 ├── .github/
 │   └── workflows/
-│       ├── manual-tasks.yml          # workflow_dispatch: create-groups | add-members
-│       └── auto-tasks.yml            # Scheduled daily: birthright group1 + group2
+│       ├── manual-tasks.yml          # Create groups / add members → Dev tenant
+│       ├── manual-tasks-test.yml     # Create groups / add members → Test tenant
+│       ├── auto-tasks.yml            # Daily 12 AM: add new joiners to Group 1 → Dev tenant
+│       └── auto-tasks-test.yml       # Daily  1 AM: add new joiners to Group 2 → Test tenant
+│
+├── config/
+│   └── pipeline.psd1                 # Shared settings (CSV paths)
 │
 ├── scripts/
 │   ├── common/
 │   │   ├── Connect-EntraTenant.ps1   # Connect via service principal
 │   │   └── Write-Log.ps1             # Timestamped INFO/WARN/ERROR logging
 │   ├── manual-tasks/
-│   │   ├── New-EntraGroups.ps1       # Create groups from data/input/groups.csv
-│   │   └── Add-EntraGroupMembers.ps1 # Add members from data/input/members.csv
+│   │   ├── New-EntraGroups.ps1       # Create groups from groups.csv
+│   │   └── Add-EntraGroupMembers.ps1 # Add members from members.csv
 │   └── auto-tasks/
 │       └── Add-BirthrightMembers.ps1 # Add users created in last 24 h to a group
 │
@@ -37,59 +42,33 @@ Automated group and membership management for Microsoft Entra ID using
 
 ---
 
-## Branch → Environment Strategy
-
-| Branch    | GitHub Environment | Tenant       | Triggered by          |
-|-----------|--------------------|--------------|-----------------------|
-| `test`    | `test`             | Test tenant  | `workflow_dispatch`   |
-| `main`    | `production`       | Prod tenant  | `schedule` + `workflow_dispatch` |
-
-Both workflows resolve the environment automatically from the branch at runtime.
-**No duplicate workflow files.** No secret-name prefixes needed.
-
-### Branching Workflow
+## Branch Strategy
 
 ```
-feature/* ──PR──▶ test ──PR──▶ main
-                   │              │
-              test workflow   prod workflow
-              (manual)        (manual + scheduled)
+feature/* ──PR──▶ dev ──PR──▶ test
+                   │             │
+            Dev workflows    Test workflows
 ```
 
-### Merge Prerequisites (enforced at runtime)
-
-Each workflow includes a **`verify-merge`** gate job that runs _before_ any
-Entra operations. If the prerequisite is not satisfied the run fails immediately
-with an actionable error message — no credentials are consumed.
-
-| Trigger branch | Gate check | Error if not met |
-|----------------|------------|------------------|
-| `test`  | `test` is ahead of `main` by ≥ 1 commit — i.e. a feature branch has been merged in | Merge a feature branch into `test` first |
-| `main`  | `origin/test` is a full ancestor of `main` — i.e. `test` was merged into `main` | Open a PR `test → main` and complete it first |
-
-> **Scheduled runs** (`auto-tasks.yml` cron) bypass the gate — they always
-> execute on `main` and are not preceded by a manual merge step.
-
-### Recommended Branch Protection Rules
-
-| Branch | Setting |
-|--------|---------|
-| `test` | Require PR from `feature/*`; require 1 approving review |
-| `main` | Require PR from `test` only; require 1 approving review; require status checks to pass |
+| Branch    | GitHub Environment | Tenant      |
+|-----------|--------------------|-------------|
+| `feature/*` | —                | —           |
+| `dev`     | `dev`              | Dev tenant  |
+| `test`    | `test`             | Test tenant |
 
 ---
 
 ## GitHub Environments & Secrets
 
-Create two environments in **Settings → Environments**:
+Go to **Settings → Environments** and create two environments:
 
-| Environment | Protection Rule | Secrets to configure |
-|-------------|-----------------|----------------------|
-| `test` | None | `TENANT_ID`, `CLIENT_ID`, `CLIENT_SECRET`, `BIRTHRIGHT_GROUP1_ID`, `BIRTHRIGHT_GROUP2_ID` |
-| `production` | **Required reviewers** | Same names — different values |
+| Environment | Secrets to add |
+|-------------|----------------|
+| `dev`  | `TENANT_ID`, `CLIENT_ID`, `CLIENT_SECRET`, `BIRTHRIGHT_GROUP1_ID` |
+| `test` | `TENANT_ID`, `CLIENT_ID`, `CLIENT_SECRET`, `BIRTHRIGHT_GROUP2_ID` |
 
-Using environment-scoped secrets with identical names keeps workflow files clean
-(no `TEST_` / `PROD_` prefixes).
+> Each environment holds the credentials for its own tenant.
+> `BIRTHRIGHT_GROUP1_ID` and `BIRTHRIGHT_GROUP2_ID` are the Object IDs of the target groups.
 
 ---
 
@@ -102,111 +81,119 @@ Using environment-scoped secrets with identical names keeps workflow files clean
 
 ---
 
-## Manual Tasks Workflow
+## Manual Workflows
+
+### Workflow 1 — Create groups / Add members in **Dev**
 
 **File:** [`.github/workflows/manual-tasks.yml`](.github/workflows/manual-tasks.yml)
 
-Trigger: **Actions → Manual Tasks → Run workflow** (select branch + task)
+| Trigger | What happens |
+|---------|--------------|
+| PR merged `feature/* → dev` | Both tasks run automatically |
+| `workflow_dispatch` (select branch `dev`) | You choose one task |
 
-| Input | Options |
-|-------|---------|
-| `task` | `create-groups` · `add-members` |
+**Steps to deploy to Dev:**
+1. Create a `feature/*` branch, edit [`data/input/groups.csv`](data/input/groups.csv) and/or [`data/input/members.csv`](data/input/members.csv), then commit and push.
+2. Open a Pull Request from `feature/*` → `dev` and merge it.
+3. The **Manual Tasks — Dev** workflow triggers automatically and runs both tasks.
+4. Check the `manual-tasks_dev_run{n}` artifact in Actions for the log.
 
-### create-groups
+---
 
-| Step | Action |
-|------|--------|
-| 1 | Edit [`data/input/groups.csv`](data/input/groups.csv) on a `feature/*` branch and commit |
-| 2 | Open PR `feature/* → test` and merge |
-| 3 | **Trigger workflow on `test` branch** → `verify-merge` gate passes → verify `create-groups_test_run{n}` artifact |
-| 4 | Open PR `test → main` and merge |
-| 5 | **Trigger workflow on `main` branch** → `verify-merge` gate passes → approve `production` environment gate → verify `create-groups_main_run{n}` artifact |
+### Workflow 2 — Create groups / Add members in **Test**
 
-CSV format:
+**File:** [`.github/workflows/manual-tasks-test.yml`](.github/workflows/manual-tasks-test.yml)
+
+| Trigger | What happens |
+|---------|--------------|
+| PR merged `dev → test` | Both tasks run automatically |
+| `workflow_dispatch` (select branch `test`) | You choose one task |
+
+**Steps to deploy to Test:**
+1. After the Dev run is verified, open a Pull Request from `dev` → `test` and merge it.
+2. The **Manual Tasks — Test** workflow triggers automatically and runs both tasks.
+3. Check the `manual-tasks_test_run{n}` artifact in Actions for the log.
+
+---
+
+### CSV Formats
+
+**groups.csv** — used by `create-groups`:
 ```csv
 DisplayName,MailNickname,Description
 SG-Finance-Readers,sg-finance-readers,Read access for Finance team
 ```
 
-> Groups that already exist are **skipped** (idempotent — safe to re-run).
-
-### add-members
-
-| Step | Action |
-|------|--------|
-| 1 | Edit [`data/input/members.csv`](data/input/members.csv) on a `feature/*` branch and commit |
-| 2 | Open PR `feature/* → test` and merge |
-| 3 | **Trigger workflow on `test` branch** → `verify-merge` gate passes → verify `add-members_test_run{n}` artifact |
-| 4 | Open PR `test → main` and merge |
-| 5 | **Trigger workflow on `main` branch** → `verify-merge` gate passes → approve `production` environment gate → verify `add-members_main_run{n}` artifact |
-
-CSV format:
+**members.csv** — used by `add-members`:
 ```csv
 GroupDisplayName,UserPrincipalName
 SG-Finance-Readers,alice.smith@contoso.com
 ```
 
-> Users already in the group are **skipped** (idempotent — safe to re-run).
+> Both scripts are **idempotent** — groups/members that already exist are skipped. Safe to re-run.
 
 ---
 
-## Auto Tasks Workflow
+## Auto Workflows
+
+### Workflow 3 — Daily birthright: add new joiners to **Group 1** (Dev)
 
 **File:** [`.github/workflows/auto-tasks.yml`](.github/workflows/auto-tasks.yml)
 
-Trigger: **Daily at 00:00 AEDT** (`cron: '0 13 * * *'`) on `main` (Prod) — no merge gate.
-`workflow_dispatch` on `test` or `main` for ad-hoc runs — **merge prerequisite enforced** (same rules as Manual Tasks above).
+| Trigger | Schedule |
+|---------|----------|
+| Automatic | Every day at **12:00 AM AEDT** (UTC+11) |
+| Manual | `workflow_dispatch` on any branch |
 
-Runs a **matrix job** (group1 + group2 in parallel) — both groups are processed
-in the same workflow run. `fail-fast: false` ensures group2 still runs if group1 fails.
-
-| Matrix job | Secret used for GroupId |
-|------------|-------------------------|
-| `group1` | `BIRTHRIGHT_GROUP1_ID` |
-| `group2` | `BIRTHRIGHT_GROUP2_ID` |
-
-The script [`scripts/auto-tasks/Add-BirthrightMembers.ps1`](scripts/auto-tasks/Add-BirthrightMembers.ps1)
-queries users created in the **last 24 hours** and adds them to the target group,
-skipping any who are already members.
-
-> **Timezone note:** `0 13 * * *` = 00:00 AEDT (UTC+11).
-> During AEST (UTC+10) change to `0 14 * * *`.
+Finds all users created in the **last 24 hours** in the Dev tenant and adds them to Group 1.
+Uses the `BIRTHRIGHT_GROUP1_ID` secret from the `dev` environment.
 
 ---
 
-## PowerShell Module Caching
+### Workflow 4 — Daily birthright: add new joiners to **Group 2** (Test)
 
-Both workflows cache the `Microsoft.Entra` module between runs using `actions/cache`.
-The cache is keyed on `PS_MODULE_CACHE_KEY` (default `v1`).
+**File:** [`.github/workflows/auto-tasks-test.yml`](.github/workflows/auto-tasks-test.yml)
 
-To force a fresh module install (e.g. after a version upgrade), bump the value
-in the workflow `env` block:
+| Trigger | Schedule |
+|---------|----------|
+| Automatic | Every day at **1:00 AM AEDT** (UTC+11) |
+| Manual | `workflow_dispatch` on any branch |
 
-```yaml
-env:
-  PS_MODULE_CACHE_KEY: v2   # was v1
-```
+Finds all users created in the **last 24 hours** in the Test tenant and adds them to Group 2.
+Uses the `BIRTHRIGHT_GROUP2_ID` secret from the `test` environment.
 
 ---
 
 ## Log Artifacts
 
-All runs upload logs to **GitHub Actions Artifacts** (90-day retention).
+All runs save logs as **GitHub Actions Artifacts** (retained 90 days).
+Go to **Actions → select a run → Artifacts** to download.
 
-| Artifact name | Workflow | Branch |
-|---------------|----------|--------|
-| `create-groups_{branch}_run{n}` | Manual Tasks | any |
-| `add-members_{branch}_run{n}` | Manual Tasks | any |
-| `birthright-group1_{branch}_run{n}` | Auto Tasks | any |
-| `birthright-group2_{branch}_run{n}` | Auto Tasks | any |
+| Artifact name | Workflow |
+|---------------|----------|
+| `manual-tasks_dev_run{n}` | Manual Tasks — Dev |
+| `manual-tasks_test_run{n}` | Manual Tasks — Test |
+| `birthright-group1_dev_run{n}` | Auto Tasks — Dev |
+| `birthright-group2_test_run{n}` | Auto Tasks — Test |
 
-Download: **Actions → (select run) → Artifacts**
-
-Log format:
+**Log format:**
 ```
-[2024-01-15 13:00:01] [INFO ] [Test] Connected. Processing 'data/input/groups.csv' (3 row(s))...
+[2024-01-15 13:00:01] [INFO ] [Dev] Processing 'data/input/groups.csv' (3 rows)...
 [2024-01-15 13:00:02] [INFO ] CREATED | SG-Finance-Readers
-[2024-01-15 13:00:02] [INFO ] SKIP    | SG-HR-Contributors — group already exists
-[2024-01-15 13:00:03] [ERROR] FAILED  | SG-IT-Admins | ...
-[2024-01-15 13:00:03] [INFO ] Summary | Created: 1 | Skipped: 1 | Failed: 1
+[2024-01-15 13:00:02] [INFO ] SKIP    | SG-HR-Contributors — already exists
+[2024-01-15 13:00:03] [ERROR] FAILED  | SG-IT-Admins | <error message>
+[2024-01-15 13:00:03] [INFO ] Done — Created: 1 | Skipped: 1 | Failed: 1
 ```
+
+---
+
+## Timezone Reference
+
+GitHub Actions schedules run in UTC. AEDT is UTC+11.
+
+| Local time (AEDT) | Cron (UTC) | Used by |
+|-------------------|------------|---------|
+| 12:00 AM AEDT | `0 13 * * *` | Auto Tasks — Dev (Group 1) |
+|  1:00 AM AEDT | `0 14 * * *` | Auto Tasks — Test (Group 2) |
+
+> During AEST (UTC+10, Apr–Oct), update to `0 14 * * *` and `0 15 * * *` respectively.

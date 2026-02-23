@@ -1,21 +1,19 @@
 <#
 .SYNOPSIS
-    Adds users to Entra security groups from a CSV file (idempotent — skips existing members).
+    Adds users to Entra groups as defined in data/input/members.csv.
+    Idempotent: skips users who are already members.
 
-.PARAMETER Environment   Target environment label (Test | Prod).
+.PARAMETER Environment   Environment label shown in logs (Test | Prod).
 .PARAMETER TenantId      Entra tenant ID.
 .PARAMETER ClientId      Service principal client ID.
 .PARAMETER ClientSecret  Service principal client secret.
-.PARAMETER CsvPath       CSV with columns: GroupDisplayName, UserPrincipalName
-.PARAMETER LogFile       Log file path. Convention: add-members_{env}_run{n}.log
+.PARAMETER LogFile       Path to the log file for this run.
 #>
-[CmdletBinding()]
 param (
     [Parameter(Mandatory)] [string]$Environment,
     [Parameter(Mandatory)] [string]$TenantId,
     [Parameter(Mandatory)] [string]$ClientId,
     [Parameter(Mandatory)] [string]$ClientSecret,
-    [Parameter(Mandatory)] [string]$CsvPath,
     [Parameter(Mandatory)] [string]$LogFile
 )
 
@@ -25,87 +23,63 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/../common/Connect-EntraTenant.ps1"
 . "$PSScriptRoot/../common/Write-Log.ps1"
 
-# ── Validate CSV ──────────────────────────────────────────────────────────────
-if (-not (Test-Path -Path $CsvPath)) {
-    Write-Log "CSV file not found: '$CsvPath'" -Level ERROR -LogFile $LogFile
-    exit 1
+# Load shared config (CSV path, etc.)
+$config  = Import-PowerShellDataFile (Join-Path $PSScriptRoot '../../config/pipeline.psd1')
+$csvPath = $config.MembersCsv
+
+# Validate the CSV before connecting
+if (-not (Test-Path $csvPath)) {
+    Write-Log "CSV not found: $csvPath" -Level ERROR -LogFile $LogFile; exit 1
 }
-
-$rows = Import-Csv -Path $CsvPath
-
+$rows = @(Import-Csv $csvPath)
 if ($rows.Count -eq 0) {
-    Write-Log "CSV '$CsvPath' contains no data rows. Nothing to do." -LogFile $LogFile
-    exit 0
+    Write-Log 'CSV has no data rows. Nothing to do.' -LogFile $LogFile; exit 0
 }
 
-$requiredColumns = @('GroupDisplayName', 'UserPrincipalName')
-$csvColumns      = $rows[0].PSObject.Properties.Name
-$missingColumns  = $requiredColumns | Where-Object { $_ -notin $csvColumns }
-
-if ($missingColumns) {
-    Write-Log "CSV is missing required column(s): $($missingColumns -join ', ')" -Level ERROR -LogFile $LogFile
-    exit 1
-}
-
-# ── Connect ───────────────────────────────────────────────────────────────────
 Connect-EntraTenant -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
-Write-Log "[$Environment] Connected. Processing '$CsvPath' ($($rows.Count) row(s))..." -LogFile $LogFile
+Write-Log "[$Environment] Processing '$csvPath' ($($rows.Count) rows)..." -LogFile $LogFile
 
-# ── Caches ────────────────────────────────────────────────────────────────────
-# GroupDisplayName → GroupId  (avoids repeated Graph lookups for the same group)
-$groupCache = @{}
+# Caches — avoids repeated Graph API calls for the same group
+$groupIdCache  = @{}   # GroupDisplayName → GroupId
+$memberIdCache = @{}   # GroupId          → array of member ObjectIds
 
-# GroupId → HashSet<string> of member ObjectIds  (O(1) duplicate detection)
-$memberCache = @{}
+$added = 0; $skipped = 0; $failed = 0
 
-$ok = 0; $skip = 0; $fail = 0
-
-# ── Process rows ──────────────────────────────────────────────────────────────
 foreach ($row in $rows) {
     try {
-        # ── Resolve group (cached) ────────────────────────────────────────────
-        if (-not $groupCache.ContainsKey($row.GroupDisplayName)) {
-            $escapedGroup = $row.GroupDisplayName.Replace("'", "''")
-            $g = Get-EntraGroup -Filter "DisplayName eq '$escapedGroup'" |
-                     Select-Object -First 1
-            if (-not $g) { throw "Group '$($row.GroupDisplayName)' not found." }
-            $groupCache[$row.GroupDisplayName] = $g.Id
+        # Resolve group (cached)
+        if (-not $groupIdCache.ContainsKey($row.GroupDisplayName)) {
+            $safeName = $row.GroupDisplayName.Replace("'", "''")
+            $g = Get-EntraGroup -Filter "DisplayName eq '$safeName'" | Select-Object -First 1
+            if (-not $g) { throw "Group '$($row.GroupDisplayName)' not found" }
+
+            $groupIdCache[$row.GroupDisplayName] = $g.Id
+            $memberIdCache[$g.Id] = @(Get-EntraGroupMember -GroupId $g.Id -All).Id
         }
-        $groupId = $groupCache[$row.GroupDisplayName]
+        $gid = $groupIdCache[$row.GroupDisplayName]
 
-        # ── Load membership into HashSet on first encounter of this group ─────
-        if (-not $memberCache.ContainsKey($groupId)) {
-            $set = [System.Collections.Generic.HashSet[string]]::new(
-                       [System.StringComparer]::OrdinalIgnoreCase)
-            @(Get-EntraGroupMember -GroupId $groupId -All).Id |
-                ForEach-Object { $set.Add($_) | Out-Null }
-            $memberCache[$groupId] = $set
-        }
+        # Resolve user
+        $safeUPN = $row.UserPrincipalName.Replace("'", "''")
+        $user = Get-EntraUser -Filter "UserPrincipalName eq '$safeUPN'" | Select-Object -First 1
+        if (-not $user) { throw "User '$($row.UserPrincipalName)' not found" }
 
-        # ── Resolve user ──────────────────────────────────────────────────────
-        $escapedUPN = $row.UserPrincipalName.Replace("'", "''")
-        $user = Get-EntraUser -Filter "UserPrincipalName eq '$escapedUPN'" |
-                    Select-Object -First 1
-        if (-not $user) { throw "User '$($row.UserPrincipalName)' not found." }
-
-        # ── Skip if already a member ──────────────────────────────────────────
-        if ($memberCache[$groupId].Contains($user.Id)) {
-            Write-Log "SKIP    | $($row.UserPrincipalName) already a member of '$($row.GroupDisplayName)'" -LogFile $LogFile
-            $skip++
-            continue
+        # Skip if already a member
+        if ($user.Id -in $memberIdCache[$gid]) {
+            Write-Log "SKIP    | $($row.UserPrincipalName) already in '$($row.GroupDisplayName)'" -LogFile $LogFile
+            $skipped++; continue
         }
 
-        Add-EntraGroupMember -GroupId $groupId -RefObjectId $user.Id
-        $memberCache[$groupId].Add($user.Id) | Out-Null   # keep cache current
+        Add-EntraGroupMember -GroupId $gid -RefObjectId $user.Id
+        $memberIdCache[$gid] += $user.Id   # keep cache current for this run
 
         Write-Log "ADDED   | $($row.UserPrincipalName) → $($row.GroupDisplayName)" -LogFile $LogFile
-        $ok++
+        $added++
     }
     catch {
         Write-Log "FAILED  | $($row.UserPrincipalName) → $($row.GroupDisplayName) | $_" -Level ERROR -LogFile $LogFile
-        $fail++
+        $failed++
     }
 }
 
-Write-Log "Summary | Added: $ok | Skipped: $skip | Failed: $fail" -LogFile $LogFile
-if ($fail -gt 0) { exit 1 }
+Write-Log "Done — Added: $added | Skipped: $skipped | Failed: $failed" -LogFile $LogFile
+if ($failed -gt 0) { exit 1 }

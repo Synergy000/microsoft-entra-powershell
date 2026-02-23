@@ -1,0 +1,68 @@
+name: Manual BAU Tasks
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [dev, test]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment
+        required: true
+        type: choice
+        options: [dev, test]
+      task:
+        description: Task
+        required: true
+        type: choice
+        options: [create-groups, add-members]
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+       github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ github.event_name == 'pull_request' && github.base_ref || inputs.environment }}
+    env:
+      ENV_NAME:      ${{ github.event_name == 'pull_request' && github.base_ref || inputs.environment }}
+      TENANT_ID:     ${{ secrets.TENANT_ID }}
+      CLIENT_ID:     ${{ secrets.CLIENT_ID }}
+      CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Microsoft Entra PowerShell
+        shell: pwsh
+        run: Install-Module Microsoft.Entra -Force -AllowClobber -Scope CurrentUser
+
+      - name: Create groups
+        if: github.event_name == 'pull_request' || inputs.task == 'create-groups'
+        shell: pwsh
+        run: |
+          ./scripts/manual-tasks/New-EntraGroups.ps1 `
+            -Environment $env:ENV_NAME `
+            -TenantId $env:TENANT_ID -ClientId $env:CLIENT_ID -ClientSecret $env:CLIENT_SECRET `
+            -LogFile logs/$env:ENV_NAME/create-groups_run${{ github.run_number }}.log
+
+      - name: Add members
+        if: github.event_name == 'pull_request' || inputs.task == 'add-members'
+        shell: pwsh
+        run: |
+          ./scripts/manual-tasks/Add-EntraGroupMembers.ps1 `
+            -Environment $env:ENV_NAME `
+            -TenantId $env:TENANT_ID -ClientId $env:CLIENT_ID -ClientSecret $env:CLIENT_SECRET `
+            -LogFile logs/$env:ENV_NAME/add-members_run${{ github.run_number }}.log
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-tasks_${{ env.ENV_NAME }}_run${{ github.run_number }}
+          path: logs/
+          retention-days: 90
