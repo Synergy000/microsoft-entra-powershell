@@ -26,7 +26,7 @@ function Connect-EntraTenant {
     )
 
     try {
-        Connect-Entra -TenantId $TenantId -ClientId $ClientId -FederatedToken $FederatedToken `
+        Connect-Entra -TenantId $TenantId -ClientId $ClientId -ClientAssertion $FederatedToken `
                       -NoWelcome -ErrorAction Stop
     }
     catch {
