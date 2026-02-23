@@ -1,3 +1,3 @@
 DisplayName,MailNickname,Description
-ASG-Finance-Reader,ASG-Finance-Reader,Read access for Finance team
-ASG-Finance-Contributor,ASG-Finance-Contributor,Contributor access for HR team
+ASG-Finance-Readers,ASG-Finance-Reader,Read access for Finance team
+ASG-Finance-Contributors,ASG-Finance-Contributor,Contributor access for HR team
