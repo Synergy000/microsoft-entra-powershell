@@ -6,14 +6,14 @@
 .PARAMETER Environment   Environment label shown in logs (Test | Prod).
 .PARAMETER TenantId      Entra tenant ID.
 .PARAMETER ClientId      Service principal client ID.
-.PARAMETER ClientSecret  Service principal client secret.
-.PARAMETER LogFile       Path to the log file for this run.
+.PARAMETER FederatedToken OIDC token from the GitHub Actions identity provider.
+.PARAMETER LogFile        Path to the log file for this run.
 #>
 param (
     [Parameter(Mandatory)] [string]$Environment,
     [Parameter(Mandatory)] [string]$TenantId,
     [Parameter(Mandatory)] [string]$ClientId,
-    [Parameter(Mandatory)] [string]$ClientSecret,
+    [Parameter(Mandatory)] [string]$FederatedToken,
     [Parameter(Mandatory)] [string]$LogFile
 )
 
@@ -36,7 +36,7 @@ if ($rows.Count -eq 0) {
     Write-Log 'CSV has no data rows. Nothing to do.' -LogFile $LogFile; exit 0
 }
 
-Connect-EntraTenant -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
+Connect-EntraTenant -TenantId $TenantId -ClientId $ClientId -FederatedToken $FederatedToken
 Write-Log "[$Environment] Processing '$csvPath' ($($rows.Count) rows)..." -LogFile $LogFile
 
 # Caches — avoids repeated Graph API calls for the same group

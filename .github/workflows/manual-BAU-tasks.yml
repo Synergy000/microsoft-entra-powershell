@@ -19,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   run:
@@ -29,10 +30,9 @@ jobs:
     timeout-minutes: 30
     environment: ${{ github.event_name == 'pull_request' && github.base_ref || inputs.environment }}
     env:
-      ENV_NAME:      ${{ github.event_name == 'pull_request' && github.base_ref || inputs.environment }}
-      TENANT_ID:     ${{ secrets.TENANT_ID }}
-      CLIENT_ID:     ${{ secrets.CLIENT_ID }}
-      CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+      ENV_NAME:  ${{ github.event_name == 'pull_request' && github.base_ref || inputs.environment }}
+      TENANT_ID: ${{ secrets.TENANT_ID }}
+      CLIENT_ID: ${{ secrets.CLIENT_ID }}
 
     steps:
       - uses: actions/checkout@v4
@@ -41,13 +41,21 @@ jobs:
         shell: pwsh
         run: Install-Module Microsoft.Entra -Force -AllowClobber -Scope CurrentUser
 
+      - name: Get OIDC token
+        shell: pwsh
+        run: |
+          $r = Invoke-RestMethod `
+            -Uri "$($env:ACTIONS_ID_TOKEN_REQUEST_URL)&audience=api://AzureADTokenExchange" `
+            -Headers @{ Authorization = "Bearer $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN" }
+          "FEDERATED_TOKEN=$($r.value)" >> $env:GITHUB_ENV
+
       - name: Create groups
         if: github.event_name == 'pull_request' || inputs.task == 'create-groups'
         shell: pwsh
         run: |
           ./scripts/manual-tasks/New-EntraGroups.ps1 `
             -Environment $env:ENV_NAME `
-            -TenantId $env:TENANT_ID -ClientId $env:CLIENT_ID -ClientSecret $env:CLIENT_SECRET `
+            -TenantId $env:TENANT_ID -ClientId $env:CLIENT_ID -FederatedToken $env:FEDERATED_TOKEN `
             -LogFile logs/$env:ENV_NAME/create-groups_run${{ github.run_number }}.log
 
       - name: Add members
@@ -56,7 +64,7 @@ jobs:
         run: |
           ./scripts/manual-tasks/Add-EntraGroupMembers.ps1 `
             -Environment $env:ENV_NAME `
-            -TenantId $env:TENANT_ID -ClientId $env:CLIENT_ID -ClientSecret $env:CLIENT_SECRET `
+            -TenantId $env:TENANT_ID -ClientId $env:CLIENT_ID -FederatedToken $env:FEDERATED_TOKEN `
             -LogFile logs/$env:ENV_NAME/add-members_run${{ github.run_number }}.log
 
       - name: Upload logs

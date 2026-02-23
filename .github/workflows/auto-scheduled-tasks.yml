@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   birthright:
@@ -24,11 +25,10 @@ jobs:
     timeout-minutes: 30
     environment: ${{ github.event_name == 'pull_request' && github.base_ref || inputs.environment }}
     env:
-      ENV_NAME:      ${{ github.event_name == 'pull_request' && github.base_ref || inputs.environment }}
-      TENANT_ID:     ${{ secrets.TENANT_ID }}
-      CLIENT_ID:     ${{ secrets.CLIENT_ID }}
-      CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
-      GROUP_ID:      ${{ secrets.BIRTHRIGHT_GROUP_ID }}
+      ENV_NAME:  ${{ github.event_name == 'pull_request' && github.base_ref || inputs.environment }}
+      TENANT_ID: ${{ secrets.TENANT_ID }}
+      CLIENT_ID: ${{ secrets.CLIENT_ID }}
+      GROUP_ID:  ${{ secrets.BIRTHRIGHT_GROUP_ID }}
 
     steps:
       - uses: actions/checkout@v4
@@ -37,12 +37,20 @@ jobs:
         shell: pwsh
         run: Install-Module Microsoft.Entra -Force -AllowClobber -Scope CurrentUser
 
+      - name: Get OIDC token
+        shell: pwsh
+        run: |
+          $r = Invoke-RestMethod `
+            -Uri "$($env:ACTIONS_ID_TOKEN_REQUEST_URL)&audience=api://AzureADTokenExchange" `
+            -Headers @{ Authorization = "Bearer $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN" }
+          "FEDERATED_TOKEN=$($r.value)" >> $env:GITHUB_ENV
+
       - name: Add new joiners to birthright group
         shell: pwsh
         run: |
           ./scripts/auto-tasks/Add-BirthrightMembers.ps1 `
             -Environment $env:ENV_NAME `
-            -TenantId $env:TENANT_ID -ClientId $env:CLIENT_ID -ClientSecret $env:CLIENT_SECRET `
+            -TenantId $env:TENANT_ID -ClientId $env:CLIENT_ID -FederatedToken $env:FEDERATED_TOKEN `
             -GroupId $env:GROUP_ID `
             -LogFile logs/$env:ENV_NAME/birthright_run${{ github.run_number }}.log
 
