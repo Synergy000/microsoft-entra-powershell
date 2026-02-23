@@ -1,6 +1,9 @@
 name: Manual BAU Tasks
 
 on:
+  pull_request:
+    types: [closed]
+    branches: [dev, test]
   workflow_dispatch:
     inputs:
       environment:
@@ -20,11 +23,14 @@ permissions:
 
 jobs:
   run:
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: ${{ inputs.environment }}
+    environment: ${{ github.event_name == 'pull_request' && github.base_ref || inputs.environment }}
     env:
-      ENV_NAME:  ${{ inputs.environment }}
+      ENV_NAME:  ${{ github.event_name == 'pull_request' && github.base_ref || inputs.environment }}
       TENANT_ID: ${{ secrets.TENANT_ID }}
       CLIENT_ID: ${{ secrets.CLIENT_ID }}
 
@@ -52,7 +58,6 @@ jobs:
           "FEDERATED_TOKEN=$($r.value)" >> $env:GITHUB_ENV
 
       - name: Create groups
-        if: inputs.task == 'create-groups'
         shell: pwsh
         run: |
           ./scripts/manual-tasks/New-EntraGroups.ps1 `
@@ -61,7 +66,6 @@ jobs:
             -LogFile logs/$env:ENV_NAME/create-groups_run${{ github.run_number }}.log
 
       - name: Add members
-        if: inputs.task == 'add-members'
         shell: pwsh
         run: |
           ./scripts/manual-tasks/Add-EntraGroupMembers.ps1 `
