@@ -26,7 +26,26 @@ function Connect-EntraTenant {
     )
 
     try {
-        Connect-Entra -TenantId $TenantId -ClientId $ClientId -ClientAssertion $FederatedToken `
+        # Microsoft.Entra 1.x has no direct federated-token parameter.
+        # Exchange the OIDC JWT for an Azure AD access token using the
+        # client_credentials grant with a JWT client assertion (federated credential flow),
+        # then connect with the resulting access token.
+        $tokenResponse = Invoke-RestMethod `
+            -Method      Post `
+            -Uri         "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" `
+            -ContentType 'application/x-www-form-urlencoded' `
+            -Body        @{
+                grant_type            = 'client_credentials'
+                client_id             = $ClientId
+                client_assertion_type = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'
+                client_assertion      = $FederatedToken
+                scope                 = 'https://graph.microsoft.com/.default'
+            } `
+            -ErrorAction Stop
+
+        $SecureToken = ConvertTo-SecureString -String $tokenResponse.access_token -AsPlainText -Force
+
+        Connect-Entra -AccessToken $SecureToken -TenantId $TenantId `
                       -NoWelcome -ErrorAction Stop
     }
     catch {
